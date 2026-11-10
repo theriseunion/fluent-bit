@@ -63,8 +63,21 @@ COPY . ./
 # We split the builder setup out so people can target it or use as a base image without doing a full build.
 FROM builder-base as builder
 WORKDIR /src/fluent-bit/build/
-RUN cmake -DFLB_RELEASE=On \
+ARG TARGETARCH
+# ARM64 defaults to unsigned char, which breaks Unicode code points above U+FFFF
+# in the 3.0.4 JSON encoder. jemalloc page size 64 KiB supports 64 KiB-page
+# kernels while remaining usable on ARM64 systems with smaller page sizes.
+RUN if [ "${TARGETARCH}" = "arm64" ]; then \
+        CMAKE_C_FLAGS="-fsigned-char"; \
+        FLB_JEMALLOC_OPTIONS="--with-lg-quantum=3 --with-lg-page=16"; \
+    else \
+        CMAKE_C_FLAGS=""; \
+        FLB_JEMALLOC_OPTIONS=""; \
+    fi && \
+    cmake -DFLB_RELEASE=On \
     -DFLB_JEMALLOC=On \
+    -DFLB_JEMALLOC_OPTIONS="${FLB_JEMALLOC_OPTIONS}" \
+    -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" \
     -DFLB_TLS=On \
     -DFLB_SHARED_LIB=Off \
     -DFLB_EXAMPLES=Off \
