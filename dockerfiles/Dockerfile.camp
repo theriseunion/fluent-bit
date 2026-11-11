@@ -1,0 +1,50 @@
+# CAMP v5.1.5 runtime. Run from the repository root, on the target architecture.
+# ARM64 jemalloc supports native 4KB, 16KB and 64KB kernel pages.
+ARG BUILD_BASE_IMAGE=debian:trixie-slim
+ARG RUNTIME_IMAGE=cr.fluentbit.io/fluent/fluent-bit:5.1.5@sha256:2740f387f6e68fab66d28e4fa6a853387b9cab6ffb4cb78958f69bba4eb0e7b4
+FROM ${RUNTIME_IMAGE} AS upstream-runtime
+FROM ${BUILD_BASE_IMAGE} AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+COPY --from=upstream-runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN apt-get -o Acquire::Retries=3 update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl git make tar libssl-dev \
+    libcurl4-openssl-dev libsasl2-dev pkg-config libsystemd-dev zlib1g-dev \
+    libpq-dev postgresql-server-dev-all flex bison libyaml-dev \
+    && apt-get satisfy -y cmake 'cmake (<< 4.0)' \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src/fluent-bit
+COPY . .
+ARG BUILD_JOBS=8
+RUN mkdir -p build && cd build \
+    && if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+         jemalloc_options='--with-lg-quantum=3 --with-lg-page=16'; \
+       else jemalloc_options=''; fi \
+    && cmake -DFLB_SIMD=On -DFLB_RELEASE=On -DFLB_JEMALLOC=On \
+       -DFLB_JEMALLOC_OPTIONS="$jemalloc_options" \
+       -DFLB_TLS=On -DFLB_SHARED_LIB=Off -DFLB_EXAMPLES=Off \
+       -DFLB_HTTP_SERVER=On -DFLB_IN_EXEC=Off -DFLB_IN_SYSTEMD=On \
+       -DFLB_OUT_KAFKA=On -DFLB_OUT_PGSQL=On -DFLB_NIGHTLY_BUILD= \
+       -DFLB_LOG_NO_CONTROL_CHARS=On -DFLB_CHUNK_TRACE=On .. \
+    && make -j "$BUILD_JOBS" \
+    && if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+         grep -R -E '^#define LG_PAGE 16$' jemalloc-prefix/src/jemalloc-build/include/jemalloc/internal/jemalloc_internal_defs.h; \
+       fi
+# Reuse the upstream runtime dependencies, replacing the executable before the
+# final COPY. The final image has one layer, no compiler and no superseded binary.
+COPY --from=upstream-runtime / /runtime-root/
+RUN install -s build/bin/fluent-bit /runtime-root/fluent-bit/bin/fluent-bit \
+    && chroot /runtime-root /fluent-bit/bin/fluent-bit -J > /runtime-root/fluent-bit/etc/schema.json
+FROM scratch AS production
+COPY --from=builder /runtime-root/ /
+ENV FLUENT_BIT_VERSION=5.1.5 \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+LABEL org.opencontainers.image.version="5.1.5" \
+      org.opencontainers.image.source="https://github.com/theriseunion/fluent-bit" \
+      org.opencontainers.image.revision="0039c4f0d1b530bedd8448df2fa4c301d58a5b91" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      io.rise.fluent-bit.arm64-jemalloc-options="--with-lg-quantum=3 --with-lg-page=16" \
+      io.rise.fluent-bit.packaging="single-runtime-layer"
+USER 0
+EXPOSE 2020
+ENTRYPOINT ["/fluent-bit/bin/fluent-bit"]
+CMD ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]

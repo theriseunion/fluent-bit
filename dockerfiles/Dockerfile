@@ -75,10 +75,15 @@ ENV EXTRA_CMAKE_FLAGS=${EXTRA_CMAKE_FLAGS}
 # Optional: jemalloc configure flags (e.g., page size). Leave unset to keep defaults.
 ARG FLB_JEMALLOC_OPTIONS
 ENV FLB_JEMALLOC_OPTIONS=${FLB_JEMALLOC_OPTIONS}
+ARG TARGETARCH
+ARG BUILD_JOBS=8
 
 # We do not want word splitting for EXTRA_CMAKE_FLAGS in case multiple are defined
 # hadolint ignore=SC2086
 RUN [ -n "${WAMR_BUILD_TARGET:-}" ] && EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DWAMR_BUILD_TARGET=$WAMR_BUILD_TARGET"; \
+    if [ "${TARGETARCH:-$(dpkg --print-architecture)}" = arm64 ] && [ -z "$FLB_JEMALLOC_OPTIONS" ]; then \
+        FLB_JEMALLOC_OPTIONS="--with-lg-quantum=3 --with-lg-page=16"; \
+    fi; \
     cmake -DFLB_SIMD=On \
     -DFLB_RELEASE=On \
     -DFLB_JEMALLOC=On \
@@ -100,7 +105,7 @@ RUN [ -n "${WAMR_BUILD_TARGET:-}" ] && EXTRA_CMAKE_FLAGS="$EXTRA_CMAKE_FLAGS -DW
 ARG CFLAGS="-v"
 ENV CFLAGS=${CFLAGS}
 
-RUN make -j "$(getconf _NPROCESSORS_ONLN)" && \
+RUN make -j "$BUILD_JOBS" && \
     install bin/fluent-bit /fluent-bit/bin/
 
 # Configuration files
