@@ -115,7 +115,9 @@ static int s3_tag_busy(struct flb_s3 *ctx, const char *tag, int tag_len)
 
     mk_list_foreach(head, &ctx->upload_claims) {
         claim = mk_list_entry(head, struct s3_upload_claim, _head);
-        if (ctx->key_fmt_has_seq_index ||
+        /* Legacy restored uploads have no persisted tag. Their completion
+         * claims serialize all tags rather than inventing a source identity. */
+        if (ctx->key_fmt_has_seq_index || tag == NULL || claim->tag == NULL ||
             (claim->tag_len == tag_len && memcmp(claim->tag, tag, tag_len) == 0)) {
             return FLB_TRUE;
         }
@@ -2326,10 +2328,11 @@ static struct multipart_upload *get_upload(struct flb_s3 *ctx,
     mk_list_foreach_safe(head, tmp, &ctx->uploads) {
         tmp_upload = mk_list_entry(head, struct multipart_upload, _head);
 
-        if (s3_tag_busy(ctx, tmp_upload->tag, flb_sds_len(tmp_upload->tag))) {
+        /* Restored completion-only uploads do not have a tag. */
+        if (tmp_upload->upload_state == MULTIPART_UPLOAD_STATE_COMPLETE_IN_PROGRESS) {
             continue;
         }
-        if (tmp_upload->upload_state == MULTIPART_UPLOAD_STATE_COMPLETE_IN_PROGRESS) {
+        if (s3_tag_busy(ctx, tmp_upload->tag, flb_sds_len(tmp_upload->tag))) {
             continue;
         }
         if (tmp_upload->upload_errors > ctx->ins->retry_limit) {
@@ -4306,7 +4309,7 @@ restart:
     mk_list_foreach_safe(head, tmp, &ctx->uploads) {
         m_upload = mk_list_entry(head, struct multipart_upload, _head);
         if (m_upload->completion_scan_id >= scan_id ||
-            s3_tag_busy(ctx, m_upload->tag, flb_sds_len(m_upload->tag))) {
+            s3_tag_busy(ctx, m_upload->tag, m_upload->tag ? flb_sds_len(m_upload->tag) : 0)) {
             continue;
         }
         complete = FLB_FALSE;
@@ -4337,7 +4340,8 @@ restart:
         if (complete == FLB_TRUE) {
             m_upload->upload_state = MULTIPART_UPLOAD_STATE_COMPLETE_IN_PROGRESS;
             m_upload->completion_scan_id = scan_id;
-            s3_claim_start(ctx, &claim, m_upload->tag, flb_sds_len(m_upload->tag));
+            s3_claim_start(ctx, &claim, m_upload->tag,
+                           m_upload->tag ? flb_sds_len(m_upload->tag) : 0);
             mk_list_del(&m_upload->_head);
             ret = complete_multipart_upload(ctx, m_upload, NULL);
             s3_claim_end(&claim);
