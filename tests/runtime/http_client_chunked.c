@@ -33,6 +33,7 @@ struct chunked_server_ctx {
     int       listen_fd;
     int       port;
     pthread_t thread;
+    const char **responses;
 };
 
 static int socket_write_all(int fd, const char *buffer, size_t length)
@@ -124,8 +125,10 @@ static void *chunked_server_thread(void *data)
         NULL
     };
     int index;
+    const char **selected;
 
     ctx = data;
+    selected = ctx->responses ? ctx->responses : fragments;
 
     conn_fd = accept(ctx->listen_fd, NULL, NULL);
     if (conn_fd == -1) {
@@ -135,10 +138,10 @@ static void *chunked_server_thread(void *data)
     bytes = recv(conn_fd, request, sizeof(request), 0);
     (void) bytes;
 
-    for (index = 0; fragments[index] != NULL; index++) {
-        fragment_length = strlen(fragments[index]);
+    for (index = 0; selected[index] != NULL; index++) {
+        fragment_length = strlen(selected[index]);
 
-        if (socket_write_all(conn_fd, fragments[index], fragment_length) != 0) {
+        if (socket_write_all(conn_fd, selected[index], fragment_length) != 0) {
             break;
         }
 
@@ -150,7 +153,7 @@ static void *chunked_server_thread(void *data)
     return NULL;
 }
 
-static struct runtime_http_client_ctx *runtime_http_client_ctx_create(int port)
+static struct runtime_http_client_ctx *runtime_http_client_ctx_create(int port, int synchronous)
 {
     struct runtime_http_client_ctx *ctx;
     static int coro_initialized = FLB_FALSE;
@@ -191,6 +194,9 @@ static struct runtime_http_client_ctx *runtime_http_client_ctx_create(int port)
         return NULL;
     }
 
+    if (synchronous) {
+        flb_stream_disable_async_mode(&ctx->u->base);
+    }
     ctx->u_conn = flb_upstream_conn_get(ctx->u);
     if (!TEST_CHECK(ctx->u_conn != NULL)) {
         flb_upstream_destroy(ctx->u);
@@ -263,7 +269,7 @@ void test_http_client_chunked_runtime()
     }
     thread_started = FLB_TRUE;
 
-    ctx = runtime_http_client_ctx_create(server.port);
+    ctx = runtime_http_client_ctx_create(server.port, 0);
     if (!TEST_CHECK(ctx != NULL)) {
         flb_socket_close(server.listen_fd);
         pthread_join(server.thread, NULL);
@@ -328,7 +334,87 @@ cleanup:
     }
 }
 
+
+static void check_http_response(const char *response, int expected_success)
+{
+    struct chunked_server_ctx server;
+    struct runtime_http_client_ctx *ctx;
+    struct flb_http_client *client;
+    const char *responses[] = {response, NULL};
+    size_t bytes_sent;
+    int ret;
+
+    memset(&server, 0, sizeof(server));
+    server.responses = responses;
+    server.listen_fd = create_listen_socket(&server.port);
+    if (!TEST_CHECK(server.listen_fd != -1)) {
+        return;
+    }
+    ret = pthread_create(&server.thread, NULL, chunked_server_thread, &server);
+    if (!TEST_CHECK(ret == 0)) {
+        flb_socket_close(server.listen_fd);
+        return;
+    }
+    ctx = runtime_http_client_ctx_create(server.port, 1);
+    if (!TEST_CHECK(ctx != NULL)) {
+        shutdown(server.listen_fd, SHUT_RDWR);
+        flb_socket_close(server.listen_fd);
+        pthread_join(server.thread, NULL);
+        return;
+    }
+    client = flb_http_client(ctx->u_conn, FLB_HTTP_GET, "/", NULL, 0,
+                             "127.0.0.1", server.port, NULL, FLB_HTTP_11);
+    if (TEST_CHECK(client != NULL)) {
+        ret = flb_http_do(client, &bytes_sent);
+        if (expected_success) {
+            TEST_CHECK(ret == 0);
+            TEST_CHECK(client->resp.status == 200);
+            TEST_CHECK(client->resp.payload_size == 4);
+            if (client->resp.payload_size == 4) {
+                TEST_CHECK(memcmp(client->resp.payload, "test", 4) == 0);
+            }
+        }
+        else {
+            TEST_CHECK(ret != 0);
+        }
+        flb_http_client_destroy(client);
+    }
+    runtime_http_client_ctx_destroy(ctx);
+    flb_socket_close(server.listen_fd);
+    pthread_join(server.thread, NULL);
+}
+
+void test_http_eof_empty(void)
+{
+    check_http_response("", 0);
+}
+
+void test_http_eof_header(void)
+{
+    check_http_response("HTTP/1.1 200 OK\r\nContent-Len", 0);
+}
+
+void test_http_eof_body(void)
+{
+    check_http_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nte", 0);
+}
+
+void test_http_eof_chunk(void)
+{
+    check_http_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nte", 0);
+}
+
+void test_http_complete_body(void)
+{
+    check_http_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ntest", 1);
+}
+
 TEST_LIST = {
+    {"http_eof_empty", test_http_eof_empty},
+    {"http_eof_header", test_http_eof_header},
+    {"http_eof_body", test_http_eof_body},
+    {"http_eof_chunk", test_http_eof_chunk},
+    {"http_complete_body", test_http_complete_body},
     {"http_client_chunked_runtime", test_http_client_chunked_runtime},
     {0}
 };

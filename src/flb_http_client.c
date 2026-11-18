@@ -2055,6 +2055,12 @@ int flb_http_get_response_data(struct flb_http_client *c, size_t bytes_consumed)
         if (r_bytes <= 0) {
             now = time(NULL);
 
+            /* EOF cannot supply the remaining HTTP/1.1 response bytes. */
+            if (r_bytes == 0 && !(c->flags & FLB_HTTP_10)) {
+                flb_upstream_conn_recycle(c->u_conn, FLB_FALSE);
+                return FLB_HTTP_ERROR;
+            }
+
             if (c->flags & FLB_HTTP_10) {
                 return FLB_HTTP_OK;
             }

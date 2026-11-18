@@ -793,6 +793,100 @@ void flb_test_s3_complete_upload_error(void)
     flb_free(store_dir);
 }
 
+void flb_test_s3_multipart_restart_completion(void)
+{
+    int ret;
+    flb_ctx_t *ctx;
+    int in_ffd;
+    int out_ffd;
+    char *call_count_str;
+    int call_count;
+    char *store_dir;
+    struct flb_s3 *s3_ctx;
+
+    store_dir = create_test_store_directory("/flb-s3-test-upload-err-XXXXXX");
+    TEST_CHECK(store_dir != NULL);
+    if (store_dir == NULL) {
+        return;
+    }
+
+    /* mocks calls- signals that we are in test mode */
+    setenv("FLB_S3_PLUGIN_UNDER_TEST", "true", 1);
+    setenv("TEST_COMPLETE_MULTIPART_UPLOAD_ERROR", ERROR_ACCESS_DENIED, 1);
+
+    ctx = flb_create();
+
+    in_ffd = flb_input(ctx, (char *) "lib", NULL);
+    TEST_CHECK(in_ffd >= 0);
+    flb_input_set(ctx,in_ffd, "tag", "test", NULL);
+
+    out_ffd = flb_output(ctx, (char *) "s3", NULL);
+    TEST_CHECK(out_ffd >= 0);
+    flb_output_set(ctx, out_ffd,"match", "*", NULL);
+    flb_output_set(ctx, out_ffd,"region", "us-west-2", NULL);
+    flb_output_set(ctx, out_ffd,"bucket", "fluent", NULL);
+    flb_output_set(ctx, out_ffd,"upload_timeout", S3_TEST_UPLOAD_TIMEOUT, NULL);
+    flb_output_set(ctx, out_ffd,"store_dir", store_dir, NULL);
+    flb_output_set(ctx, out_ffd,"Retry_Limit", "1", NULL);
+
+    ret = flb_start(ctx);
+    TEST_CHECK(ret == 0);
+
+    s3_ctx = get_s3_context(ctx);
+    TEST_CHECK(s3_ctx != NULL);
+
+    flb_lib_push(ctx, in_ffd, (char *) JSON_TD , (int) sizeof(JSON_TD) - 1);
+
+    wait_for_s3_call_count("CompleteMultipartUpload", 2);
+
+    call_count_str = getenv("TEST_CompleteMultipartUpload_CALL_COUNT");
+    call_count = call_count_str ? atoi(call_count_str) : 0;
+    TEST_CHECK_(call_count >= 2,
+                "Expected >= 2 CompleteMultipartUpload calls (retried), got %d",
+                call_count);
+
+    wait_for_file_count(s3_ctx->stream_upload->path, 1);
+    TEST_CHECK_(count_files_recursive(s3_ctx->stream_upload->path) > 0,
+                "Expected multipart metadata to remain recoverable after completion failure");
+
+    flb_stop(ctx);
+    flb_destroy(ctx);
+
+    /* Re-open actual persisted metadata without a source tag. Restored uploads
+     * are completion-only; startup must finish them without dereferencing tag. */
+    unsetenv("TEST_COMPLETE_MULTIPART_UPLOAD_ERROR");
+    setenv("TEST_CompleteMultipartUpload_CALL_COUNT", "0", 1);
+    ctx = flb_create();
+    in_ffd = flb_input(ctx, (char *) "lib", NULL);
+    TEST_CHECK(in_ffd >= 0);
+    out_ffd = flb_output(ctx, (char *) "s3", NULL);
+    TEST_CHECK(out_ffd >= 0);
+    flb_output_set(ctx, out_ffd, "match", "*", NULL);
+    flb_output_set(ctx, out_ffd, "region", "us-west-2", NULL);
+    flb_output_set(ctx, out_ffd, "bucket", "fluent", NULL);
+    flb_output_set(ctx, out_ffd, "upload_timeout", S3_TEST_UPLOAD_TIMEOUT, NULL);
+    flb_output_set(ctx, out_ffd, "store_dir", store_dir, NULL);
+    ret = flb_start(ctx);
+    TEST_CHECK(ret == 0);
+    s3_ctx = get_s3_context(ctx);
+    TEST_CHECK(s3_ctx != NULL);
+    if (s3_ctx != NULL) {
+        wait_for_s3_call_count("CompleteMultipartUpload", 1);
+        TEST_CHECK(get_s3_call_count("CompleteMultipartUpload") >= 1);
+        wait_for_file_count_at_most(s3_ctx->stream_upload->path, 0);
+        TEST_CHECK(count_files_recursive(s3_ctx->stream_upload->path) == 0);
+    }
+    flb_stop(ctx);
+    flb_destroy(ctx);
+    unsetenv("FLB_S3_PLUGIN_UNDER_TEST");
+    unsetenv("TEST_COMPLETE_MULTIPART_UPLOAD_ERROR");
+    unsetenv("TEST_CreateMultipartUpload_CALL_COUNT");
+    unsetenv("TEST_UploadPart_CALL_COUNT");
+    unsetenv("TEST_CompleteMultipartUpload_CALL_COUNT");
+    unsetenv("TEST_PutObject_CALL_COUNT");
+    flb_free(store_dir);
+}
+
 void flb_test_s3_ordered_retry_uses_backoff_deadline(void)
 {
     int ret;
@@ -2485,6 +2579,7 @@ static void flb_test_s3_credentials_serialized(void)
 TEST_LIST = {
     {"credentials_serialized", flb_test_s3_credentials_serialized },
     {"multipart_success", flb_test_s3_multipart_success },
+    {"multipart_restart_completion", flb_test_s3_multipart_restart_completion },
     {"putobject_success", flb_test_s3_putobject_success },
     {"putobject_error", flb_test_s3_putobject_error },
     {"putobject_retry_limit_semantics", flb_test_s3_putobject_retry_limit_semantics },
